@@ -4,6 +4,7 @@ Statistical analysis routines (pure inference, non-predictive) for lesion-sympto
 
 from .chisq import ChiSquareResult, run_chi_square
 from .ttest import TTestResult, TTestAssumptionResult, run_ttest
+from .brunner_munzel import BrunnerMunzelResult, run_brunner_munzel
 
 __all__ = [
     "ChiSquareResult",
@@ -11,4 +12,6 @@ __all__ = [
     "TTestResult",
     "TTestAssumptionResult",
     "run_ttest",
+    "BrunnerMunzelResult",
+    "run_brunner_munzel",
 ]
