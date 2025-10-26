@@ -17,23 +17,13 @@ and beta-map export, supporting both regression and classification models.
 """
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+import json
+import joblib
 
 import numpy as np
-
-# Optional imports guarded
-try:
-    import SimpleITK as sitk
-except Exception:
-    sitk = None  # type: ignore
-
-try:
-    from ants.core.ants_image import ANTsImage  # type: ignore[attr-defined]
-except Exception:
-    ANTsImage = None  # type: ignore
 
 from sklearn.base import BaseEstimator
 from sklearn.preprocessing import LabelEncoder
@@ -50,69 +40,11 @@ try:
 except Exception:
     xgb = None
 
-if TYPE_CHECKING:
-    from ants.core.ants_image import ANTsImage as _ANTsImageType  # pragma: no cover
-else:
-    _ANTsImageType = Any  # pragma: no cover
-
-
-ImageLike = Union[np.ndarray, "sitk.Image", "_ANTsImageType", str, Path]
-
-
-# ---------------------------
-# Utility helpers
-# ---------------------------
-
-def _to_numpy3d(img: ImageLike) -> np.ndarray:
-    """Convert numpy, file path, SimpleITK, or ANTs image to a 3D numpy array (z, y, x)."""
-    if isinstance(img, np.ndarray):
-        arr = img
-    elif isinstance(img, (str, Path)):
-        path = Path(img)
-        if not path.exists():
-            raise FileNotFoundError(f"Image not found at {path}")
-        if ANTsImage is not None:
-            try:
-                import ants  # type: ignore[import]
-            except ImportError as exc:
-                raise RuntimeError(
-                    "antspy is required to read images from disk when using ANTs backend."
-                ) from exc
-            arr = ants.image_read(str(path)).numpy()
-        else:
-            if sitk is None:
-                raise RuntimeError(
-                    "Neither antspy nor SimpleITK is available to load image paths."
-                )
-            img_obj = sitk.ReadImage(str(path))
-            arr = sitk.GetArrayFromImage(img_obj)
-    elif ANTsImage is not None and isinstance(img, ANTsImage):
-        arr = img.numpy()
-    else:
-        if sitk is None or not isinstance(img, sitk.Image):
-            raise TypeError(
-                "Input must be numpy.ndarray, str/Path to an image, SimpleITK.Image, or ants.core.ANTsImage."
-            )
-        arr = sitk.GetArrayFromImage(img)  # (z, y, x)
-    if arr.ndim != 3:
-        raise ValueError(f"Expected 3D array, got shape {arr.shape}")
-    return arr.astype(np.float32, copy=False)
-
-
-def _flatten_with_mask(vol: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """Flatten a volume using a boolean mask -> 1D feature vector."""
-    return vol[mask].ravel()
-
-
-def _unit_norm_rows(X: np.ndarray, eps: float = 1e-12) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Row-wise L2 normalization with epsilon (dTLVC).
-    Returns normalized X and original row norms (TLV proxies).
-    """
-    norms = np.linalg.norm(X, axis=1, keepdims=True)
-    norms_safe = np.maximum(norms, eps)
-    Xn = X / norms_safe
-    return Xn, norms.squeeze(1)
+from pyleison_map.preprocess.lesion_matrix import (
+    ImageLike,
+    build_lesion_matrix,
+    vectorize_image_to_mask,
+)
 
 
 def _signed_from_groups(X: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -152,15 +84,23 @@ class LesionPreprocessor:
         3D boolean mask to restrict analysis (e.g., atlas-derived). If None, use union of lesions.
     keep_empty_subjects : bool
         Whether to keep samples with zero lesion after masking. If False, such samples are dropped.
+    voxelwise_zscore : bool
+        Apply per-voxel z-score normalization across subjects.
+    subjectwise_l2 : bool
+        Apply per-subject L2 normalization (dTLVC) to the flattened lesion vectors.
     """
     min_lesion_count: int = 1
     brain_mask: Optional[np.ndarray] = None
     keep_empty_subjects: bool = True
+    voxelwise_zscore: bool = False
+    subjectwise_l2: bool = True
 
     # Populated after `fit_transform`
     vol_shape_: Optional[Tuple[int, int, int]] = None
     feat_mask_: Optional[np.ndarray] = None  # 1D boolean mask after flatten
     kept_idx_: Optional[np.ndarray] = None   # indices of samples retained (if some were dropped)
+    voxel_means_: Optional[np.ndarray] = None
+    voxel_stds_: Optional[np.ndarray] = None
 
     def fit_transform(
         self,
@@ -179,65 +119,41 @@ class LesionPreprocessor:
             ANTs images, or filesystem paths to disk-backed images.
         """
         # Convert all to numpy (n, z, y, x)
-        arrs = [ _to_numpy3d(im) for im in imgs ]
-        self.vol_shape_ = arrs[0].shape
+        result = build_lesion_matrix(
+            imgs,
+            mask=self.brain_mask,
+            binarize=binarize,
+            min_voxel_lesion_count=self.min_lesion_count,
+            drop_empty_rows=not self.keep_empty_subjects,
+            apply_voxelwise_zscore=self.voxelwise_zscore,
+            apply_subjectwise_l2=self.subjectwise_l2,
+            dtype=np.float32,
+        )
 
-        # Optional binarization (typical for lesion masks)
-        if binarize:
-            arrs = [(a > 0).astype(np.float32) for a in arrs]
+        self.vol_shape_ = result.volume_shape
+        self.feat_mask_ = result.feature_mask
+        self.kept_idx_ = result.kept_indices
+        self.voxel_means_ = result.voxel_means
+        self.voxel_stds_ = result.voxel_stds
 
-        # Build base mask
-        if self.brain_mask is None:
-            union = np.zeros(self.vol_shape_, dtype=bool)
-            for a in arrs:
-                union |= (a > 0)
-            base_mask = union
-        else:
-            if self.brain_mask.shape != self.vol_shape_:
-                raise ValueError("brain_mask shape mismatch")
-            base_mask = self.brain_mask.astype(bool)
+        y_kept = y[result.kept_indices]
 
-        # Apply min_lesion_count (valid-voxel mask)
-        stack = np.stack([(a > 0) for a in arrs], axis=0)  # (n, z, y, x)
-        lesion_counts = stack.sum(axis=0)
-        valid_mask = base_mask & (lesion_counts >= self.min_lesion_count)
-
-        # Flatten features
-        X = np.stack([_flatten_with_mask(a, valid_mask) for a in arrs], axis=0)  # (n, p)
-
-        # Optionally drop empty rows (all zeros after mask)
-        row_nonzero = (X.sum(axis=1) > 0)
-        if not self.keep_empty_subjects:
-            kept_idx = np.where(row_nonzero)[0]
-        else:
-            kept_idx = np.arange(X.shape[0])
-        X = X[kept_idx]
-        y_kept = y[kept_idx]
-
-        # dTLVC (unit-norm per subject vector)
-        Xn, norms = _unit_norm_rows(X)
-
-        # Save masks
-        self.feat_mask_ = valid_mask.ravel()
-        self.kept_idx_ = kept_idx
-
-        return Xn, y_kept
+        return result.matrix.astype(np.float32, copy=False), y_kept
 
     def transform_single(self, img: ImageLike, binarize: bool = True) -> np.ndarray:
         """Vectorize one image (numpy/SimpleITK/ANTs/path) and dTLVC-normalize it."""
         if self.vol_shape_ is None or self.feat_mask_ is None:
             raise RuntimeError("Preprocessor is not fitted. Call fit_transform first.")
-        a = _to_numpy3d(img)
-        if a.shape != self.vol_shape_:
-            raise ValueError(f"Image shape {a.shape} != training shape {self.vol_shape_}")
-        if binarize:
-            a = (a > 0).astype(np.float32)
-        x = a.ravel()[self.feat_mask_].astype(np.float32, copy=False)
-        # dTLVC on the single vector
-        n = np.linalg.norm(x)
-        if n > 1e-12:
-            x = x / n
-        return x
+        return vectorize_image_to_mask(
+            img,
+            feature_mask=self.feat_mask_,
+            volume_shape=self.vol_shape_,
+            binarize=binarize,
+            apply_voxelwise_zscore=self.voxelwise_zscore,
+            voxel_means=self.voxel_means_,
+            voxel_stds=self.voxel_stds_,
+            apply_subjectwise_l2=self.subjectwise_l2,
+        )
 
     def vector_to_volume(self, vec: np.ndarray) -> np.ndarray:
         """Scatter a feature vector back to 3D using the feature mask."""
@@ -345,6 +261,23 @@ class LesionModelBase:
 
     def _beta_vector(self) -> np.ndarray:
         raise NotImplementedError
+
+    # ---------------------------
+    # Persistence
+    # ---------------------------
+
+    def save(self, directory: Union[str, Path]) -> None:
+        """
+        Persist the trained model, estimator, and preprocessing state to disk.
+        """
+        _save_ml_model(self, directory)
+
+    @classmethod
+    def load(cls, directory: Union[str, Path]) -> "LesionModelBase":
+        """
+        Restore a saved model from disk.
+        """
+        return load_model(directory)
 
 
 # ---------------------------
@@ -524,6 +457,12 @@ class RBF_SVM_OVR_Classifier(LesionModelBase):
             beta = (dual @ sv).ravel().astype(np.float32, copy=False)
             rows.append(beta)
         return np.vstack(rows)
+
+
+# ---------------------------
+# Factory / convenience
+# ---------------------------
+
 # ---------------------------
 # Factory / convenience
 # ---------------------------
@@ -566,3 +505,144 @@ def make_model(
             raise ValueError("svr_rbf is regression-only.")
         return SVR_RBF_Model(**kwargs)
     raise ValueError(f"Unknown kind={kind}")
+
+
+_MODEL_REGISTRY: Dict[str, Any] = {
+    cls.__name__: cls
+    for cls in [
+        LassoRegression,
+        LinearSVRModel,
+        LinearSVMClassifier,
+        L1LogisticClassifier,
+        RandomForestModel,
+        AdaBoostModel,
+        XGBoostModel,
+        SVR_RBF_Model,
+        RBF_SVM_OVR_Classifier,
+    ]
+}
+
+
+def _save_ml_model(model: LesionModelBase, directory: Union[str, Path]) -> None:
+    path = Path(directory)
+    path.mkdir(parents=True, exist_ok=True)
+
+    metadata = {
+        "version": 1,
+        "model_type": "lesion_ml",
+        "class_name": model.__class__.__name__,
+        "task": model.task,
+        "signed_importance_for_trees": bool(getattr(model, "signed_importance_for_trees", False)),
+        "is_fitted": bool(getattr(model, "_is_fitted", False)),
+        "preprocessor": {
+            "min_lesion_count": int(model.prep.min_lesion_count),
+            "keep_empty_subjects": bool(model.prep.keep_empty_subjects),
+            "voxelwise_zscore": bool(model.prep.voxelwise_zscore),
+            "subjectwise_l2": bool(model.prep.subjectwise_l2),
+        },
+        "label_encoder": {
+            "has_classes": bool(
+                model.label_encoder is not None and hasattr(model.label_encoder, "classes_")
+            ),
+        },
+    }
+
+    metadata_path = path / "model.json"
+    with metadata_path.open("w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+
+    estimator_path = path / "estimator.joblib"
+    joblib.dump(model.estimator, estimator_path)
+
+    state_arrays: Dict[str, np.ndarray] = {}
+    if model.prep.vol_shape_ is not None:
+        state_arrays["vol_shape"] = np.asarray(model.prep.vol_shape_, dtype=np.int64)
+    if model.prep.feat_mask_ is not None:
+        state_arrays["feat_mask"] = model.prep.feat_mask_.astype(np.uint8)
+    if model.prep.kept_idx_ is not None:
+        state_arrays["kept_idx"] = model.prep.kept_idx_.astype(np.int64)
+    if model.prep.brain_mask is not None:
+        state_arrays["brain_mask"] = model.prep.brain_mask.astype(np.uint8)
+    if metadata["label_encoder"]["has_classes"]:
+        state_arrays["label_classes"] = np.asarray(model.label_encoder.classes_)
+    if model.prep.voxel_means_ is not None:
+        state_arrays["voxel_means"] = model.prep.voxel_means_.astype(np.float32)
+    if model.prep.voxel_stds_ is not None:
+        state_arrays["voxel_stds"] = model.prep.voxel_stds_.astype(np.float32)
+
+    state_path = path / "state.npz"
+    if state_arrays:
+        np.savez_compressed(state_path, **state_arrays)
+    elif state_path.exists():
+        state_path.unlink()
+
+
+def load_model(directory: Union[str, Path]) -> LesionModelBase:
+    path = Path(directory)
+    metadata_path = path / "model.json"
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"Missing metadata file at {metadata_path}")
+    with metadata_path.open("r", encoding="utf-8") as f:
+        metadata = json.load(f)
+
+    if metadata.get("model_type") != "lesion_ml":
+        raise ValueError(f"Unexpected model_type {metadata.get('model_type')}")
+
+    class_name = metadata["class_name"]
+    if class_name not in _MODEL_REGISTRY:
+        raise ValueError(f"Unknown model class '{class_name}' in metadata.")
+
+    cls = _MODEL_REGISTRY[class_name]
+    model = cls.__new__(cls)  # type: ignore[misc]
+
+    estimator_path = path / "estimator.joblib"
+    if not estimator_path.exists():
+        raise FileNotFoundError(f"Missing estimator file at {estimator_path}")
+    estimator = joblib.load(estimator_path)
+
+    state_path = path / "state.npz"
+    state_arrays: Dict[str, np.ndarray] = {}
+    if state_path.exists():
+        with np.load(state_path, allow_pickle=False) as state_data:
+            for key in state_data.files:
+                state_arrays[key] = state_data[key]
+
+    brain_mask = None
+    if "brain_mask" in state_arrays and state_arrays["brain_mask"].size > 0:
+        brain_mask = state_arrays["brain_mask"].astype(bool)
+
+    preproc_meta = metadata["preprocessor"]
+    preproc = LesionPreprocessor(
+        min_lesion_count=int(preproc_meta["min_lesion_count"]),
+        brain_mask=brain_mask,
+        keep_empty_subjects=bool(preproc_meta["keep_empty_subjects"]),
+        voxelwise_zscore=bool(preproc_meta.get("voxelwise_zscore", False)),
+        subjectwise_l2=bool(preproc_meta.get("subjectwise_l2", True)),
+    )
+
+    if "vol_shape" in state_arrays and state_arrays["vol_shape"].size > 0:
+        preproc.vol_shape_ = tuple(int(x) for x in state_arrays["vol_shape"].tolist())  # type: ignore[assignment]
+    if "feat_mask" in state_arrays and state_arrays["feat_mask"].size > 0:
+        preproc.feat_mask_ = state_arrays["feat_mask"].astype(bool)
+    if "kept_idx" in state_arrays and state_arrays["kept_idx"].size > 0:
+        preproc.kept_idx_ = state_arrays["kept_idx"].astype(np.int64)
+    if "voxel_means" in state_arrays:
+        preproc.voxel_means_ = state_arrays["voxel_means"]
+    if "voxel_stds" in state_arrays:
+        preproc.voxel_stds_ = state_arrays["voxel_stds"]
+
+    label_info = metadata.get("label_encoder", {})
+    if label_info.get("has_classes") and "label_classes" in state_arrays:
+        label_encoder = LabelEncoder()
+        label_encoder.classes_ = state_arrays["label_classes"]
+    else:
+        label_encoder = None
+
+    model.estimator = estimator  # type: ignore[attr-defined]
+    model.task = metadata["task"]  # type: ignore[attr-defined]
+    model.prep = preproc  # type: ignore[attr-defined]
+    model.signed_importance_for_trees = metadata.get("signed_importance_for_trees", False)  # type: ignore[attr-defined]
+    model.label_encoder = label_encoder  # type: ignore[attr-defined]
+    model._is_fitted = metadata.get("is_fitted", False)  # type: ignore[attr-defined]
+
+    return model

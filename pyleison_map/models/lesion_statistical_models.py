@@ -7,6 +7,7 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+import json
 
 import numpy as np
 
@@ -23,6 +24,8 @@ __all__ = [
     "SCCANResult",
     "run_sccan",
     "optimize_sccan_sparseness",
+    "save_sccan_result",
+    "load_sccan_result",
 ]
 
 
@@ -75,6 +78,9 @@ def run_sccan(
 ) -> SCCANResult:
     """
     Run SCCAN on an already vectorised lesion matrix and behavior scores.
+
+    Use :func:`pyleison_map.preprocess.lesion_matrix.build_lesion_matrix` to obtain
+    the `lesmat` input from lesion images when needed.
 
     Parameters mirror LESYMAP::lsm_sccan where possible.
     """
@@ -348,6 +354,111 @@ def optimize_sccan_sparseness(
     best_sparse, best_corr = best_val
     pval = _corr_to_pvalue(best_corr, n)
     return {"minimum": best_sparse, "objective": best_cost, "cv_correlation": best_corr, "cv_pvalue": pval}
+
+
+def save_sccan_result(
+    result: SCCANResult,
+    directory: Union[str, Path],
+    *,
+    save_raw_weights_image: bool = True,
+) -> None:
+    """
+    Persist an SCCANResult to disk using the recommended folder layout.
+    """
+
+    path = Path(directory)
+    path.mkdir(parents=True, exist_ok=True)
+
+    metadata = {
+        "version": 1,
+        "model_type": "sccan_result",
+        "cca_correlation": float(result.cca_correlation),
+        "optimal_sparseness": result.optimal_sparseness,
+        "cv_correlation": result.cv_correlation,
+        "cv_pvalue": result.cv_pvalue,
+        "has_raw_weights_image": bool(save_raw_weights_image and result.raw_weights_image is not None),
+    }
+
+    metadata_path = path / "model.json"
+    with metadata_path.open("w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+
+    arrays: Dict[str, np.ndarray] = {
+        "statistic": result.statistic.astype(np.float32),
+        "eig1": result.eig1.astype(np.float32),
+        "eig2": result.eig2.astype(np.float32),
+    }
+    if result.behavior_scale is not None:
+        arrays["behavior_scale"] = np.asarray(result.behavior_scale)
+    if result.behavior_center is not None:
+        arrays["behavior_center"] = np.asarray(result.behavior_center)
+    if result.lesmat_scale is not None:
+        arrays["lesmat_scale"] = np.asarray(result.lesmat_scale)
+    if result.lesmat_center is not None:
+        arrays["lesmat_center"] = np.asarray(result.lesmat_center)
+
+    arrays_path = path / "weights.npz"
+    np.savez_compressed(arrays_path, **arrays)
+
+    if metadata["has_raw_weights_image"]:
+        if ants is None:
+            raise ImportError("Saving raw weight image requires antspy.")
+        raw_path = path / "raw_weights.nii.gz"
+        ants.image_write(result.raw_weights_image, str(raw_path))
+
+
+def load_sccan_result(directory: Union[str, Path]) -> SCCANResult:
+    """
+    Load an SCCANResult previously saved with `save_sccan_result`.
+    """
+
+    path = Path(directory)
+    metadata_path = path / "model.json"
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"Missing SCCAN metadata at {metadata_path}")
+    with metadata_path.open("r", encoding="utf-8") as f:
+        metadata = json.load(f)
+
+    if metadata.get("model_type") != "sccan_result":
+        raise ValueError(f"Unexpected model_type {metadata.get('model_type')}")
+
+    arrays_path = path / "weights.npz"
+    if not arrays_path.exists():
+        raise FileNotFoundError(f"Missing SCCAN weights at {arrays_path}")
+    with np.load(arrays_path, allow_pickle=False) as data:
+        arrays = {key: data[key] for key in data.files}
+
+    raw_image = None
+    if metadata.get("has_raw_weights_image"):
+        if ants is None:
+            raise ImportError("Loading raw weight image requires antspy.")
+        raw_path = path / "raw_weights.nii.gz"
+        if not raw_path.exists():
+            raise FileNotFoundError(f"Missing raw weight image at {raw_path}")
+        raw_image = ants.image_read(str(raw_path))
+
+    def _get_optional(name: str) -> Optional[np.ndarray]:
+        arr = arrays.get(name)
+        if arr is None:
+            return None
+        if arr.size == 0:
+            return None
+        return arr
+
+    return SCCANResult(
+        statistic=arrays["statistic"].astype(np.float32),
+        raw_weights_image=raw_image,
+        eig1=arrays["eig1"].astype(np.float32),
+        eig2=arrays["eig2"].astype(np.float32),
+        cca_correlation=float(metadata.get("cca_correlation", float("nan"))),
+        optimal_sparseness=metadata.get("optimal_sparseness"),
+        cv_correlation=metadata.get("cv_correlation"),
+        cv_pvalue=metadata.get("cv_pvalue"),
+        behavior_scale=_get_optional("behavior_scale"),
+        behavior_center=_get_optional("behavior_center"),
+        lesmat_scale=_get_optional("lesmat_scale"),
+        lesmat_center=_get_optional("lesmat_center"),
+    )
 
 
 def _run_sparse_decom2(
