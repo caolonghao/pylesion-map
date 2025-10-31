@@ -29,10 +29,25 @@ ImageLike = Union[np.ndarray, "sitk.Image", "_ANTsImageType", str, Path]
 
 __all__ = [
     "ImageLike",
+    "PreprocessOptions",
     "LesionMatrixResult",
     "build_lesion_matrix",
     "vectorize_image_to_mask",
 ]
+
+
+@dataclass
+class PreprocessOptions:
+    """
+    Configuration for image-to-matrix preprocessing.
+    """
+
+    mask: Optional[Union[np.ndarray, ImageLike]] = None
+    binarize: bool = True
+    min_voxel_lesion_count: int = 1
+    drop_empty_rows: bool = False
+    apply_voxelwise_zscore: bool = False
+    apply_subjectwise_l2: bool = False
 
 
 @dataclass

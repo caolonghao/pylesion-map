@@ -56,6 +56,82 @@ import lesion_models  # 或 from pyleison_map import lesion_models
 
 ---
 
+## 代码结构速览：预处理与模型拆分
+
+为了提升可维护性，`lesion_models` 已拆分为独立子模块，按职责组织在 `pyleison_map.models.lesion_ml` 包内：
+
+- `preprocessing.py`：提供 `LesionPreprocessor` 与 `preprocessing_kwargs_from_options`。  
+  - `LesionPreprocessor` 负责掩膜构建、向量化、可选的 voxelwise z-score 与 dTLVC，并记录 `kept_idx_` 等状态以支持体素重建。  
+  - `preprocessing_kwargs_from_options` 将高层的 `PreprocessOptions`（出自 `pyleison_map.preprocess.lesion_matrix`）转换为模型工厂所需的关键字参数，供 orchestrator、交叉验证等调用方复用。
+- `base.py`：定义 `LesionModelBase`，封装通用的 `fit/predict/beta_map` 接口与持久化钩子。
+- `models.py`：具体的 sklearn / xgboost 包装类、`make_model` 工厂以及 `MODEL_REGISTRY`。
+- `persistence.py`：统一的 `save_model` / `load_model` 帮助函数，负责写入/恢复 estimator、掩膜与标签编码器等状态。
+
+旧文件 `pyleison_map.models.lesion_ml_models` 仍作为兼容层存在，会直接 re-export 以上符号；因此原有代码仍可以使用 `from pyleison_map import lesion_models`。如果希望更细粒度地控制预处理或持久化流程，可直接从新子包导入所需组件，例如：
+
+```python
+from pyleison_map.models.lesion_ml import LesionPreprocessor, make_model
+```
+
+后续示例依旧使用 `lesion_models` 命名空间，但了解其内部拆分后，你可以在需要时组合底层模块实现更复杂的工作流。
+
+---
+
+## 预处理工具箱：`pyleison_map.preprocess`
+
+除模型内部的向量化步骤外，`preprocess` 目录还提供了若干常用的影像处理工具，方便在建模前完成配准、重采样与矩阵化：
+
+- `lesion_matrix.py`  
+  - `build_lesion_matrix(images, ...)`：将一批病灶体积转换为 subject-by-voxel 矩阵，支持最小病灶计数、掩膜、voxelwise z-score 与行归一化等选项，返回 `LesionMatrixResult`（包含 `matrix`, `feature_mask`, `kept_indices` 等元数据）。  
+  - `vectorize_image_to_mask(image, feature_mask, volume_shape, ...)`：使用已有的特征掩膜将单个体积转换为向量，常用于推理或持久化后的载入。  
+  - `PreprocessOptions`：面向 orchestrator 的高层配置对象，便于在不同流程间共享参数。
+- `normalisation.py`  
+  - `normalize_to_template(images, template, ...)`：基于 antspy 进行图像配准，可一次性处理影像与对应分割，选择 SyN 等变换，并返回 `NormalizationResult`（包含配准后的影像、变换路径等信息）。  
+  - 需要提前安装 `antspyx`；若设置 `save_registered_images/segmentations=True`，记得提供输出目录。
+- `resample.py`  
+  - `resample_images(images, target_spacing=None, target_shape=None, ...)`：同样依赖 antspy，按目标体素间距或体素数重采样，支持保存到磁盘并返回 `ResampleResult` 以追踪输出路径和空间信息。
+
+这些函数可单独使用。例如，在将原始病灶影像送入模型前，可先调用 `normalize_to_template` 完成配准，再用 `resample_images` 统一分辨率，最后通过 `build_lesion_matrix` 生成矩阵/掩膜供后续分析或机器学习模型复用。
+
+```python
+from pathlib import Path
+
+from pyleison_map.preprocess import normalisation, resample, lesion_matrix, PreprocessOptions
+
+# 1) 配准到模板空间
+template_path = Path("/data/template/MNI.nii.gz")
+norm_results = normalisation.normalize_to_template(
+    images=["/data/raw/sub01.nii.gz", "/data/raw/sub02.nii.gz"],
+    template=template_path,
+    save_registered_images=True,
+    image_output_dir="/data/registered",
+)
+registered_imgs = [res.warped_image for res in norm_results]
+
+# 2) 可选：统一分辨率/体素数
+resampled = resample.resample_images(
+    registered_imgs,
+    target_spacing=(1.0, 1.0, 1.0),
+    interpolator="linear",
+)
+resampled_imgs = [res.resampled_image for res in resampled]
+
+# 3) 构建病灶矩阵并获取掩膜、保留索引等信息
+pre_opts = PreprocessOptions(min_voxel_lesion_count=3, apply_subjectwise_l2=True)
+matrix_result = lesion_matrix.build_lesion_matrix(
+    resampled_imgs,
+    mask=pre_opts.mask,
+    binarize=pre_opts.binarize,
+    min_voxel_lesion_count=pre_opts.min_voxel_lesion_count,
+    drop_empty_rows=pre_opts.drop_empty_rows,
+    apply_voxelwise_zscore=pre_opts.apply_voxelwise_zscore,
+    apply_subjectwise_l2=pre_opts.apply_subjectwise_l2,
+)
+print(matrix_result.matrix.shape, matrix_result.feature_mask.sum())
+```
+
+---
+
 ## 快速上手：回归与分类
 
 ### 示例 1：回归（Lasso）
@@ -180,6 +256,105 @@ print("平均指标:", out["mean"])       # dict
 
 - 回归指标包含：`r2`, `rmse`, `mae`, `mse`, `pearson_r`, `spearman_r`
 - 分类指标包含：`acc`, `balanced_acc`, `f1`, `roc_auc`, `pr_auc`, `log_loss`（按可用性）
+
+---
+
+## 顶层 orchestration 快速体验
+
+若希望“一次调用”完成影像→矩阵→模型/统计分析，推荐使用 `pyleison_map.analysis` 模块，它提供三个入口函数：
+
+| 函数 | 功能 | 典型输出 |
+| --- | --- | --- |
+| `run_ml_model` | 训练机器学习模型（Lasso、SVR、RF 等） | `MLModelResult`，包含预处理配置、保留样本索引与已训练 `LesionModelBase` |
+| `run_statistical_model` | 仅 SCCAN：统计驱动且可预测 | `StatisticalModelResult`，含预处理信息、保留索引与 `SCCANResult` |
+| `run_statistical_analysis` | 纯统计检验（Chi-square、t-test/Welch、Brunner-Munzel） | `StatisticalAnalysisResult`，携带预处理信息、保留索引与相应结果 dataclass |
+
+所有入口都接受统一的影像列表与标签列表输入：
+
+```python
+img_list = [img1, img2, ...]  # 可为 NIfTI 路径、SimpleITK/ANTs 对象或 numpy 数组
+y_list = [y1, y2, ...]        # 连续值或类别标签
+```
+
+### 1. 训练 ML 模型
+
+```python
+from pyleison_map.analysis import run_ml_model
+
+ml_result = run_ml_model(
+    images=img_list,
+    behavior=y_list,
+    method="lasso",                 # 也可用 "linear_svr", "rf", "svr_rbf" 等
+    task="regression",              # 或 "classification"
+    preprocess=PreprocessOptions(    # 可选；未传入时使用模型默认 dTLVC 设置
+        min_voxel_lesion_count=5,
+        drop_empty_rows=False,
+        apply_voxelwise_zscore=False,
+        apply_subjectwise_l2=True,
+    ),
+    model_kwargs={
+        # 仍可覆盖模型自身超参数，例如 Lasso 的 alpha
+        "alpha": 1.0,
+    },
+)
+
+trained_model = ml_result.model
+print(trained_model.predict(img_list[0]))
+trained_model.save("artifacts/ml/lasso_model")
+```
+
+`run_ml_model` 返回的 `LesionModelBase` 完整支持 `predict`、`beta_map`、`save/load` 等接口。
+
+### 2. SCCAN（统计模型+预测）
+
+```python
+from pyleison_map.analysis import run_statistical_model, PreprocessOptions
+
+pre_opts = PreprocessOptions(
+    min_voxel_lesion_count=5,
+    apply_voxelwise_zscore=True,
+    apply_subjectwise_l2=False,
+)
+
+sccan_result = run_statistical_model(
+    images=img_list,
+    behavior=y_list,
+    preprocess=pre_opts,
+    sccan_kwargs={
+        "optimize_sparseness": True,
+        "p_threshold": 0.05,
+    },
+)
+
+print(sccan_result.result.cca_correlation)
+print(sccan_result.result.statistic.shape)  # 病灶权重向量
+print(sccan_result.kept_indices.shape)      # 经过预处理后保留下的样本
+```
+
+### 3. 纯统计检验
+
+```python
+from pyleison_map.analysis import run_statistical_analysis, PreprocessOptions
+
+analysis_pre = PreprocessOptions(
+    min_voxel_lesion_count=3,
+    apply_voxelwise_zscore=False,
+    apply_subjectwise_l2=False,
+)
+
+chi_out = run_statistical_analysis(
+    images=img_list,
+    behavior=y_list,           # chi-square 需二分类标签
+    method="chi_square",
+    preprocess=analysis_pre,
+    method_kwargs={"yates_correction": True, "n_permutations": 1000},
+)
+
+chi_result = chi_out.result
+print(chi_result.statistic[:10], chi_result.pvalue[:10])
+```
+
+若 `method="ttest"` 或 `"welch"` 会返回 `TTestResult`；`"brunner_munzel"` 返回 `BrunnerMunzelResult`，可进一步指定 voxelwise permutation、FWER rank 等参数以复现 LESYMAP 行为。
 
 ---
 

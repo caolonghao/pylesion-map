@@ -21,6 +21,8 @@ from sklearn.metrics import (
     roc_auc_score, average_precision_score, log_loss
 )
 
+from pyleison_map.models import lesion_ml_models
+
 # -------------------------------
 # Metric utilities
 # -------------------------------
@@ -80,7 +82,7 @@ def _stack_results(per_fold: List[Dict[str, float]]) -> Dict[str, float]:
 # -------------------------------
 
 def _clone_model(base_kind: str, task: str, base_kwargs: Dict[str, Any]) -> Any:
-    return lesion_models.make_model(kind=base_kind, task=task, **base_kwargs)
+    return lesion_ml_models.make_model(kind=base_kind, task=task, **base_kwargs)
 
 
 def _apply_params(model, params: Dict[str, Any]) -> None:
@@ -252,6 +254,8 @@ def grid_search_lesion_model(
                 min_lesion_count=model.prep.min_lesion_count,
                 brain_mask=model.prep.brain_mask,
                 keep_empty_subjects=model.prep.keep_empty_subjects,
+                voxelwise_zscore=model.prep.voxelwise_zscore,
+                subjectwise_l2=model.prep.subjectwise_l2,
                 signed_importance_for_trees=getattr(model, "signed_importance_for_trees", False),
                 # estimator params are set inside fold via _apply_params on a fresh model if needed
             ),

@@ -1,16 +1,14 @@
 """
-Backward-compatible shim for lesion ML model components.
-
-The implementation now lives in the modular `pyleison_map.models.lesion_ml` package.
+Modular lesion ML model components (preprocessing, wrappers, persistence).
 """
 from __future__ import annotations
 
-from .lesion_ml import (
+from .preprocessing import LesionPreprocessor, preprocessing_kwargs_from_options
+from .base import LesionModelBase
+from .models import (
     AdaBoostModel,
     L1LogisticClassifier,
     LassoRegression,
-    LesionModelBase,
-    LesionPreprocessor,
     LinearSVMClassifier,
     LinearSVRModel,
     MODEL_REGISTRY,
@@ -18,11 +16,9 @@ from .lesion_ml import (
     RandomForestModel,
     SVR_RBF_Model,
     XGBoostModel,
-    load_model,
     make_model,
-    preprocessing_kwargs_from_options,
-    save_model,
 )
+from .persistence import load_model, save_model
 
 __all__ = [
     "LesionPreprocessor",
