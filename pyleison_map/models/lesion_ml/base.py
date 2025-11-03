@@ -12,7 +12,14 @@ from sklearn.base import BaseEstimator
 from sklearn.preprocessing import LabelEncoder
 from sklearn.utils.validation import check_is_fitted
 
-from pyleison_map.preprocess.lesion_matrix import ImageLike
+# Flexible ImageLike import to support different contexts (package vs local run)
+try:
+    from pyleison_map.preprocess.lesion_matrix import ImageLike
+except Exception:  # pragma: no cover - runtime flexibility
+    try:
+        from preprocess.lesion_matrix import ImageLike
+    except Exception:
+        from ..preprocess.lesion_matrix import ImageLike
 
 from .preprocessing import LesionPreprocessor
 

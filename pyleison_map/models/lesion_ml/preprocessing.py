@@ -8,12 +8,29 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
-from pyleison_map.preprocess.lesion_matrix import (
-    ImageLike,
-    PreprocessOptions,
-    build_lesion_matrix,
-    vectorize_image_to_mask,
-)
+# Flexible import to support different execution contexts (installed package vs local run)
+try:
+    from pyleison_map.preprocess.lesion_matrix import (
+        ImageLike,
+        PreprocessOptions,
+        build_lesion_matrix,
+        vectorize_image_to_mask,
+    )
+except Exception:  # pragma: no cover - runtime flexibility
+    try:
+        from preprocess.lesion_matrix import (
+            ImageLike,
+            PreprocessOptions,
+            build_lesion_matrix,
+            vectorize_image_to_mask,
+        )
+    except Exception:
+        from ..preprocess.lesion_matrix import (
+            ImageLike,
+            PreprocessOptions,
+            build_lesion_matrix,
+            vectorize_image_to_mask,
+        )
 
 __all__ = [
     "LesionPreprocessor",
