@@ -42,8 +42,16 @@ __all__ = [
 
 
 class LassoRegression(LesionModelBase):
-    def __init__(self, alpha: float = 1.0, **kwargs):
-        super().__init__(Lasso(alpha=alpha, max_iter=5000), task="regression", **kwargs)
+    def __init__(
+        self,
+        alpha: float = 1.0,
+        estimator_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ):
+        est_kwargs: Dict[str, Any] = {"alpha": alpha, "max_iter": 5000}
+        if estimator_kwargs:
+            est_kwargs.update(estimator_kwargs)
+        super().__init__(Lasso(**est_kwargs), task="regression", **kwargs)
 
     def _beta_vector(self) -> np.ndarray:
         coef = getattr(self.estimator, "coef_", None)
@@ -53,8 +61,16 @@ class LassoRegression(LesionModelBase):
 
 
 class LinearSVRModel(LesionModelBase):
-    def __init__(self, C: float = 1.0, **kwargs):
-        super().__init__(LinearSVR(C=C, loss="epsilon_insensitive"), task="regression", **kwargs)
+    def __init__(
+        self,
+        C: float = 1.0,
+        estimator_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ):
+        est_kwargs: Dict[str, Any] = {"C": C, "loss": "epsilon_insensitive"}
+        if estimator_kwargs:
+            est_kwargs.update(estimator_kwargs)
+        super().__init__(LinearSVR(**est_kwargs), task="regression", **kwargs)
 
     def _beta_vector(self) -> np.ndarray:
         coef = getattr(self.estimator, "coef_", None)
@@ -64,8 +80,16 @@ class LinearSVRModel(LesionModelBase):
 
 
 class LinearSVMClassifier(LesionModelBase):
-    def __init__(self, C: float = 1.0, **kwargs):
-        super().__init__(LinearSVC(C=C), task="classification", **kwargs)
+    def __init__(
+        self,
+        C: float = 1.0,
+        estimator_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ):
+        est_kwargs: Dict[str, Any] = {"C": C}
+        if estimator_kwargs:
+            est_kwargs.update(estimator_kwargs)
+        super().__init__(LinearSVC(**est_kwargs), task="classification", **kwargs)
 
     def _beta_vector(self) -> np.ndarray:
         coef = getattr(self.estimator, "coef_", None)
@@ -75,9 +99,22 @@ class LinearSVMClassifier(LesionModelBase):
 
 
 class L1LogisticClassifier(LesionModelBase):
-    def __init__(self, C: float = 1.0, **kwargs):
+    def __init__(
+        self,
+        C: float = 1.0,
+        estimator_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ):
+        est_kwargs: Dict[str, Any] = {
+            "penalty": "l1",
+            "solver": "saga",
+            "C": C,
+            "max_iter": 3000,
+        }
+        if estimator_kwargs:
+            est_kwargs.update(estimator_kwargs)
         super().__init__(
-            LogisticRegression(penalty="l1", solver="saga", C=C, max_iter=3000),
+            LogisticRegression(**est_kwargs),
             task="classification",
             **kwargs,
         )
@@ -90,11 +127,25 @@ class L1LogisticClassifier(LesionModelBase):
 
 
 class RandomForestModel(LesionModelBase):
-    def __init__(self, n_estimators: int = 200, task: str = "regression", **kwargs):
+    def __init__(
+        self,
+        n_estimators: int = 200,
+        task: str = "regression",
+        estimator_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ):
+        est_kwargs: Dict[str, Any] = {
+            "n_estimators": n_estimators,
+            "n_jobs": -1,
+            "random_state": 42,
+        }
+        if estimator_kwargs:
+            est_kwargs.update(estimator_kwargs)
+
         if task == "regression":
-            est = RandomForestRegressor(n_estimators=n_estimators, n_jobs=-1, random_state=42)
+            est = RandomForestRegressor(**est_kwargs)
         else:
-            est = RandomForestClassifier(n_estimators=n_estimators, n_jobs=-1, random_state=42)
+            est = RandomForestClassifier(**est_kwargs)
         super().__init__(estimator=est, task=task, **kwargs)
 
     def _beta_vector(self) -> np.ndarray:
@@ -105,11 +156,21 @@ class RandomForestModel(LesionModelBase):
 
 
 class AdaBoostModel(LesionModelBase):
-    def __init__(self, n_estimators: int = 200, task: str = "regression", **kwargs):
+    def __init__(
+        self,
+        n_estimators: int = 200,
+        task: str = "regression",
+        estimator_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ):
+        est_kwargs: Dict[str, Any] = {"n_estimators": n_estimators, "random_state": 42}
+        if estimator_kwargs:
+            est_kwargs.update(estimator_kwargs)
+
         if task == "regression":
-            est = AdaBoostRegressor(n_estimators=n_estimators, random_state=42)
+            est = AdaBoostRegressor(**est_kwargs)
         else:
-            est = AdaBoostClassifier(n_estimators=n_estimators, random_state=42)
+            est = AdaBoostClassifier(**est_kwargs)
         super().__init__(estimator=est, task=task, **kwargs)
 
     def _beta_vector(self) -> np.ndarray:
@@ -126,31 +187,27 @@ class XGBoostModel(LesionModelBase):
         n_estimators: int = 300,
         max_depth: int = 6,
         learning_rate: float = 0.1,
+        estimator_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs,
     ):
         if xgb is None:
             raise ImportError("xgboost is not installed. Please `pip install xgboost`.")
+        est_kwargs: Dict[str, Any] = {
+            "n_estimators": n_estimators,
+            "max_depth": max_depth,
+            "learning_rate": learning_rate,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "n_jobs": -1,
+            "random_state": 42,
+        }
+        if estimator_kwargs:
+            est_kwargs.update(estimator_kwargs)
         if task == "regression":
-            est = xgb.XGBRegressor(
-                n_estimators=n_estimators,
-                max_depth=max_depth,
-                learning_rate=learning_rate,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                n_jobs=-1,
-                random_state=42,
-            )
+            est = xgb.XGBRegressor(**est_kwargs)
         else:
-            est = xgb.XGBClassifier(
-                n_estimators=n_estimators,
-                max_depth=max_depth,
-                learning_rate=learning_rate,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                n_jobs=-1,
-                random_state=42,
-                objective="binary:logistic",
-            )
+            est_kwargs.setdefault("objective", "binary:logistic")
+            est = xgb.XGBClassifier(**est_kwargs)
         super().__init__(estimator=est, task=task, **kwargs)
 
     def _beta_vector(self) -> np.ndarray:
@@ -166,8 +223,23 @@ class SVR_RBF_Model(LesionModelBase):
     SVR with RBF kernel and approximate beta-map via preimage/sensitivity.
     """
 
-    def __init__(self, C: float = 30.0, gamma: float = 5.0, epsilon: float = 0.1, **kwargs):
-        super().__init__(SVR(C=C, gamma=gamma, epsilon=epsilon, kernel="rbf"), task="regression", **kwargs)
+    def __init__(
+        self,
+        C: float = 30.0,
+        gamma: float = 5.0,
+        epsilon: float = 0.1,
+        estimator_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ):
+        est_kwargs: Dict[str, Any] = {
+            "C": C,
+            "gamma": gamma,
+            "epsilon": epsilon,
+            "kernel": "rbf",
+        }
+        if estimator_kwargs:
+            est_kwargs.update(estimator_kwargs)
+        super().__init__(SVR(**est_kwargs), task="regression", **kwargs)
 
     def _beta_vector(self) -> np.ndarray:
         sv = getattr(self.estimator, "support_vectors_", None)
@@ -188,9 +260,20 @@ class RBF_SVM_OVR_Classifier(LesionModelBase):
     Provides an approximate per-class beta-map by summing dual coefficients times support vectors.
     """
 
-    def __init__(self, C: float = 1.0, gamma: float = "scale", **kwargs):
+    def __init__(
+        self,
+        C: float = 1.0,
+        gamma: float = "scale",
+        svc_kwargs: Optional[Dict[str, Any]] = None,
+        ovr_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ):
+        svc_params: Dict[str, Any] = {"C": C, "kernel": "rbf", "gamma": gamma, "probability": True}
+        if svc_kwargs:
+            svc_params.update(svc_kwargs)
         base = OneVsRestClassifier(
-            SVC(C=C, kernel="rbf", gamma=gamma, probability=True)
+            SVC(**svc_params),
+            **(ovr_kwargs or {}),
         )
         super().__init__(base, task="classification", **kwargs)
 
