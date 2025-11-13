@@ -492,7 +492,7 @@ def _run_sparse_decom2(
         its=its,
         perms=nperms,
         smooth=smooth,
-        maxBased=max_based,
+        max_based=max_based,
     )
     return result
 
