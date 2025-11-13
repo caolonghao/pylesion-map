@@ -60,7 +60,7 @@ def run_sccan(
     sparseness: float = 0.045,
     sparseness_behavior: float = -0.99,
     mycoption: int = 1,
-    robust: int = 1,
+    robust: int = 0,
     nvecs: int = 1,
     cthresh: int = 150,
     its: int = 20,
@@ -112,6 +112,9 @@ def run_sccan(
     chosen_sparseness = sparseness
     cv_corr = None
     cv_pval = None
+
+    if robust not in (0,):
+        raise NotImplementedError("antspy sparse_decom2 currently supports only robust=0.")
 
     if optimize_sparseness or validate_sparseness:
         opt = optimize_sccan_sparseness(
