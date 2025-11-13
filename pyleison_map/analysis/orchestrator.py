@@ -218,7 +218,13 @@ def _build_matrix(images: Sequence[ImageLike], options: PreprocessOptions) -> Le
     )
 
 
-def _mask_from_result(result: LesionMatrixResult) -> np.ndarray:
-    mask = np.zeros(np.prod(result.volume_shape), dtype=bool)
-    mask[result.feature_mask] = True
-    return mask.reshape(result.volume_shape)
+def _mask_from_result(result: LesionMatrixResult):
+    try:
+        import ants  # type: ignore[import]
+    except ImportError as exc:  # pragma: no cover - handled by SCCAN runtime
+        raise ImportError(
+            "run_statistical_model with SCCAN requires antspy (`pip install antspyx`)."
+        ) from exc
+
+    mask_volume = result.mask_volume.astype(np.float32, copy=False)
+    return ants.from_numpy(mask_volume)
