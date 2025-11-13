@@ -331,6 +331,62 @@ print(sccan_result.result.statistic.shape)  # 病灶权重向量
 print(sccan_result.kept_indices.shape)      # 经过预处理后保留下的样本
 ```
 
+#### SCCAN 预测模型与持久化
+
+若想把 SCCAN 的 beta 作为预测函数继续使用，可按以下流程保存/加载并对新影像投影：
+
+```python
+from pathlib import Path
+
+from pyleison_map.analysis import run_statistical_model, PreprocessOptions
+from pyleison_map.models import lesion_statistical_models
+from pyleison_map.models.lesion_ml import LesionPreprocessor
+
+pre_opts = PreprocessOptions(
+    min_voxel_lesion_count=4,
+    apply_voxelwise_zscore=True,
+    apply_subjectwise_l2=False,
+)
+
+sccan_result = run_statistical_model(
+    images=img_list,
+    behavior=y_list,
+    preprocess=pre_opts,
+    sccan_kwargs={"optimize_sparseness": True},
+)
+
+# 持久化
+lesion_statistical_models.save_sccan_result(sccan_result.result, path="artifacts/sccan")
+
+# 从磁盘读取（可在其他脚本中）
+loaded = lesion_statistical_models.load_sccan_result("artifacts/sccan")
+
+# 复用 lesion_matrix 状态构造一个 LesionPreprocessor（用于 transform_single）
+prep = LesionPreprocessor(
+    min_lesion_count=pre_opts.min_voxel_lesion_count,
+    brain_mask=pre_opts.mask,
+    keep_empty_subjects=not pre_opts.drop_empty_rows,
+    voxelwise_zscore=pre_opts.apply_voxelwise_zscore,
+    subjectwise_l2=pre_opts.apply_subjectwise_l2,
+)
+prep.vol_shape_ = sccan_result.lesion_matrix.volume_shape
+prep.feat_mask_ = sccan_result.lesion_matrix.feature_mask
+prep.kept_idx_ = sccan_result.lesion_matrix.kept_indices
+prep.voxel_means_ = sccan_result.lesion_matrix.voxel_means
+prep.voxel_stds_ = sccan_result.lesion_matrix.voxel_stds
+
+# 将新影像变成向量，并用 SCCAN eigens 得到投影
+new_vec = prep.transform_single(img_list[0])
+scaled = (new_vec - loaded.lesmat_center) / loaded.lesmat_scale
+proj = scaled @ loaded.eig1.T
+behavior_pred = proj @ loaded.eig2.T
+if loaded.behavior_scale is not None:
+    behavior_pred = behavior_pred * loaded.behavior_scale + loaded.behavior_center
+print("SCCAN projection (first row):", behavior_pred[0])
+```
+
+这段示例展示如何把 SCCAN 看作“预训练模型”：`LesionPreprocessor` 负责复用 `feature_mask`+归一化参数，`eig1`/`eig2` 与 `lesmat_scale`/`behavior_scale` 的组合再现预测管线，可以用于新病例的投影或行为预测。
+
 ### 3. 纯统计检验
 
 ```python
